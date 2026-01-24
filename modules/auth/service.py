@@ -1,4 +1,3 @@
-from cmath import e
 from datetime import datetime, timedelta, UTC
 from typing import Optional
 from fastapi import Depends
@@ -197,8 +196,8 @@ class UserService:
             user_result = await self.db.execute(user_stmt)
             return user_result.scalar_one_or_none()
 
-        except JWTError:
-            print(f"DEBUG REFRESH ERROR: {e}")
+        except JWTError as jwt_err:
+            print(f"DEBUG REFRESH ERROR: {jwt_err}")
             return None
 
 

@@ -5,7 +5,7 @@ class AuthConfig(BaseSettings):
     # JWT настройки (Pydantic сам подставит значения из .env, если они там есть)
     secret_key: str = "secret-key-change-in-production"
     algorithm: str = "HS256"
-    access_token_expire_minutes: int = 1
+    access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
 
     # Настройки для cookies

@@ -1,11 +1,11 @@
 from typing import Annotated
 from datetime import datetime, UTC
 
-from fastapi import APIRouter, Depends, HTTPException, status, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie
 from fastapi.security import OAuth2PasswordRequestForm
 
 from modules.auth.service import UserService, get_user_service
-from modules.auth.schemas import UserCreate, UserRead, Token, SubscriptionUpdate, LogoutRequest, RefreshTokenRequest
+from modules.auth.schemas import UserCreate, UserRead, Token, SubscriptionUpdate, LogoutRequest
 from modules.auth.dependencies import CurrentUser, require_subscription
 from modules.auth.models import User, RefreshToken
 from modules.shared.event_bus import event_bus
@@ -31,6 +31,7 @@ async def register(
 
 @router.post("/login", response_model=Token)
 async def login(
+        response: Response,
         form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
         user_service: UserService = Depends(get_user_service),
 ):
@@ -55,36 +56,46 @@ async def login(
     # Сохраняем refresh токен
     await user_service.save_refresh_token(user.id, refresh_token)
 
+    # УСТАНАВЛИВАЕМ REFRESH TOKEN В КУКИ
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,   # JavaScript не сможет его прочитать
+        secure=False,    # True для HTTPS
+        samesite="lax",  # Защита от CSRF
+        max_age=7 * 24 * 60 * 60  # 7 дней
+    )
+
     return Token(
         access_token=access_token,
-        refresh_token=refresh_token,
         token_type="bearer"
     )
 
 
 @router.post("/refresh", response_model=Token)
 async def refresh_token(
-        data: RefreshTokenRequest,
+        response: Response,
+        refresh_token: str = Cookie(None),
         user_service: UserService = Depends(get_user_service),
 ):
     """Обновление access токена по refresh токену"""
-    user = await user_service.verify_refresh_token(data.refresh_token)
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Refresh token missing")
+
+    user = await user_service.verify_refresh_token(refresh_token)
 
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
 
     # Создаем новый access токен
     new_access_token = user_service.create_access_token(
         data={"sub": str(user.id), "email": user.email, "subscription_tier": user.subscription_tier}
     )
 
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, samesite="lax")
+
     return Token(
         access_token=new_access_token,
-        refresh_token=data.refresh_token,  # Тот же refresh токен
         token_type="bearer"
     )
 
