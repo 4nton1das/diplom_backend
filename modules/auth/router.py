@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Body
 from fastapi.security import OAuth2PasswordRequestForm
 
 from modules.auth.service import UserService, get_user_service
-from modules.auth.schemas import UserCreate, UserRead, Token, SubscriptionUpdate, LogoutRequest
+from modules.auth.schemas import UserCreate, UserRead, Token, SubscriptionUpdate, LogoutRequest, RefreshTokenRequest
 from modules.auth.dependencies import CurrentUser, require_subscription
 from modules.auth.models import User, RefreshToken
 from modules.shared.event_bus import event_bus
@@ -64,11 +64,11 @@ async def login(
 
 @router.post("/refresh", response_model=Token)
 async def refresh_token(
-        refresh_token: str,
+        data: RefreshTokenRequest,
         user_service: UserService = Depends(get_user_service),
 ):
     """Обновление access токена по refresh токену"""
-    user = await user_service.verify_refresh_token(refresh_token)
+    user = await user_service.verify_refresh_token(data.refresh_token)
 
     if not user:
         raise HTTPException(
@@ -84,7 +84,7 @@ async def refresh_token(
 
     return Token(
         access_token=new_access_token,
-        refresh_token=refresh_token,  # Тот же refresh токен
+        refresh_token=data.refresh_token,  # Тот же refresh токен
         token_type="bearer"
     )
 

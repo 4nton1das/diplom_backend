@@ -1,3 +1,4 @@
+from cmath import e
 from datetime import datetime, timedelta, UTC
 from typing import Optional
 from fastapi import Depends
@@ -178,26 +179,26 @@ class UserService:
             if token_type != "refresh" or user_id is None:
                 return None
 
-            # Проверяем, что токен есть в БД и не отозван
-            result = await self.db.execute(
-                select(RefreshToken).where(
-                    RefreshToken.token == token,
-                    RefreshToken.expires_at > datetime.now(UTC),
-                    RefreshToken.revoked_at is None
-                )
+            stmt = select(RefreshToken).where(
+                RefreshToken.token == token,
+                RefreshToken.expires_at > datetime.now(UTC),
+                RefreshToken.revoked_at.is_(None)
             )
+
+            result = await self.db.execute(stmt)
             db_token = result.scalar_one_or_none()
 
             if not db_token:
+                print("DEBUG: Refresh token not found in DB or expired/revoked")
                 return None
 
             # Получаем пользователя
-            result = await self.db.execute(
-                select(User).where(User.id == uuid.UUID(user_id))
-            )
-            return result.scalar_one_or_none()
+            user_stmt = select(User).where(User.id == uuid.UUID(user_id))
+            user_result = await self.db.execute(user_stmt)
+            return user_result.scalar_one_or_none()
 
         except JWTError:
+            print(f"DEBUG REFRESH ERROR: {e}")
             return None
 
 

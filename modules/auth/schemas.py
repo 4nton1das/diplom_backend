@@ -60,6 +60,10 @@ class LogoutRequest(BaseModel):
     refresh_token: str
 
 
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
 # Схема для обновления подписки
 class SubscriptionUpdate(BaseModel):
     tier: str
