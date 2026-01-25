@@ -1,11 +1,11 @@
-from typing import Annotated
 from datetime import datetime, UTC
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie
 from fastapi.security import OAuth2PasswordRequestForm
 
 from modules.auth.service import UserService, get_user_service
-from modules.auth.schemas import UserCreate, UserRead, Token, SubscriptionUpdate, LogoutRequest
+from modules.auth.schemas import UserCreate, UserRead, Token, SubscriptionUpdate
 from modules.auth.dependencies import CurrentUser, require_subscription
 from modules.auth.models import User, RefreshToken
 from modules.shared.event_bus import event_bus
@@ -56,7 +56,7 @@ async def login(
     # Сохраняем refresh токен
     await user_service.save_refresh_token(user.id, refresh_token)
 
-    # УСТАНАВЛИВАЕМ REFRESH TOKEN В КУКИ
+    # Устанавливаем refresh token в куки
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
@@ -66,15 +66,11 @@ async def login(
         max_age=7 * 24 * 60 * 60  # 7 дней
     )
 
-    return Token(
-        access_token=access_token,
-        token_type="bearer"
-    )
+    return Token(access_token=access_token, token_type="bearer")
 
 
 @router.post("/refresh", response_model=Token)
 async def refresh_token(
-        response: Response,
         refresh_token: str = Cookie(None),
         user_service: UserService = Depends(get_user_service),
 ):
@@ -92,31 +88,27 @@ async def refresh_token(
         data={"sub": str(user.id), "email": user.email, "subscription_tier": user.subscription_tier}
     )
 
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, samesite="lax")
-
-    return Token(
-        access_token=new_access_token,
-        token_type="bearer"
-    )
+    return Token(access_token=new_access_token, token_type="bearer")
 
 
 @router.post("/logout")
 async def logout(
-        current_user: CurrentUser,
-        logout_data: LogoutRequest,
+        response: Response,
+        refresh_token: str = Cookie(None),
         user_service: UserService = Depends(get_user_service),
 ):
     """Выход пользователя (отзыв refresh токена)"""
     from sqlalchemy import update
 
-    # Помечаем refresh токен как отозванный
-    stmt = update(RefreshToken).where(
-        RefreshToken.token == logout_data.refresh_token,
-        RefreshToken.user_id == current_user.user_id
-    ).values(revoked_at=datetime.now(UTC))
+    if refresh_token:
+        stmt = update(RefreshToken).where(
+            RefreshToken.token == refresh_token
+        ).values(revoked_at=datetime.now(UTC))
 
-    await user_service.db.execute(stmt)
-    await user_service.db.commit()
+        await user_service.db.execute(stmt)
+        await user_service.db.commit()
+
+    response.delete_cookie(key="refresh_token")
 
     return {"message": "Successfully logged out"}
 

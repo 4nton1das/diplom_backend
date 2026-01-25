@@ -48,10 +48,9 @@ class UserService:
             "sub": str(data.get("sub")),
             "type": "access"
         })
-        encoded_jwt = jwt.encode(
+        return jwt.encode(
             to_encode, auth_config.secret_key, algorithm=auth_config.algorithm
         )
-        return encoded_jwt
 
     @staticmethod
     def create_refresh_token(data: dict) -> str:
@@ -63,10 +62,9 @@ class UserService:
             "sub": str(data.get("sub")),
             "type": "refresh"
         })
-        encoded_jwt = jwt.encode(
+        return jwt.encode(
             to_encode, auth_config.secret_key, algorithm=auth_config.algorithm
         )
-        return encoded_jwt
 
     # Работа с пользователями
     async def create_user(self, user_create: UserCreate) -> User:
@@ -85,7 +83,6 @@ class UserService:
         db_user = User(
             email=user_create.email,
             hashed_password=self.hash_password(user_create.password),
-            full_name=user_create.full_name,
             subscription_tier=auth_config.subscription_default_tier,
         )
 
@@ -98,8 +95,7 @@ class UserService:
             user_id=db_user.id,
             email=db_user.email,
             registered_at=datetime.now(),
-            subscription_tier=db_user.subscription_tier,
-            full_name=db_user.full_name
+            subscription_tier=db_user.subscription_tier
         ))
 
         return db_user

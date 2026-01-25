@@ -34,7 +34,6 @@ class User(Base):
     subscription_expires_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     # Даты создания и обновления
     created_at: Mapped[datetime] = mapped_column(

@@ -11,7 +11,6 @@ class UserRegistered:
     email: str
     registered_at: datetime
     subscription_tier: str
-    full_name: Optional[str] = None
 
 
 @dataclass
