@@ -1,6 +1,5 @@
 # app/main.py
 from fastapi import FastAPI
-from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -9,7 +8,7 @@ from modules.auth.config import auth_config
 from modules.shared.database import init_db, create_tables
 
 
-app = FastAPI(title="Video Processing Platform", version="1.0.0")
+app = FastAPI(title="VideoSummarizer")
 
 # CORS
 app.add_middleware(
@@ -25,8 +24,8 @@ app.include_router(auth_router)
 
 
 # События при старте
-@asynccontextmanager
-async def lifespan():
+@app.on_event("startup")
+async def startup_event():
     await init_db()
     await create_tables()  # Создаем таблицы, если их нет
     print("Auth module started")
