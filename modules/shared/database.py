@@ -35,8 +35,9 @@ async def get_db_session() -> AsyncSession:
 async def init_db():
     """Инициализация подключения к БД"""
     async with engine.begin() as conn:
-        # Создаем схему auth если ее нет
+        # Создаем схемы
         await conn.execute(text("CREATE SCHEMA IF NOT EXISTS auth"))
+        await conn.execute(text("CREATE SCHEMA IF NOT EXISTS media"))
         await conn.run_sync(Base.metadata.create_all)
 
 

@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from modules.auth.router import router as auth_router
+from modules.media.router import router as media_router
 from modules.auth.config import auth_config
 from modules.shared.database import init_db, create_tables
 
@@ -19,8 +20,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Подключаем роутер модуля auth
+# Подключаем роутеры
 app.include_router(auth_router)
+app.include_router(media_router)
 
 
 # События при старте
@@ -28,7 +30,6 @@ app.include_router(auth_router)
 async def startup_event():
     await init_db()
     await create_tables()  # Создаем таблицы, если их нет
-    print("Auth module started")
 
 
 if __name__ == "__main__":
