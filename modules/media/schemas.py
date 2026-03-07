@@ -6,10 +6,15 @@ from pydantic import BaseModel
 
 class MediaRead(BaseModel):
     id: uuid.UUID
-    title: str
+    original_filename: str
+    file_size: int
+    mime_type: str
+    duration: Optional[int] = None
     status: str
     processing_stage: Optional[str] = None
+    visibility: str
     created_at: datetime
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
