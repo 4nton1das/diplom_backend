@@ -1,13 +1,15 @@
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from modules.asr.config import asr_config
-from modules.asr.service import transcribe_segments, split_audio
+from modules.asr.service import transcribe_segments, split_audio, load_model
+from modules.auth.models import User
 from modules.media.models import Media, ProcessingJob, Transcription
 from modules.shared.database import db_settings
-from modules.media.tasks import celery_app
+from modules.shared.celery import celery_app
+from celery.signals import worker_ready
 import librosa
 
 # Синхронный engine для Celery
@@ -41,7 +43,7 @@ def process_asr(media_id: str):
 
         # Обновляем статус задачи
         job.status = "processing"
-        job.started_at = datetime.now()
+        job.started_at = datetime.now(UTC)
         session.commit()
 
         # 1. Загружаем аудио из файла (librosa сама извлечёт из видео, если надо)
@@ -92,11 +94,11 @@ def process_asr(media_id: str):
         # 8. Обновляем статус Media
         media.status = "transcribed"
         media.processing_stage = None
-        media.updated_at = datetime.now()
+        media.updated_at = datetime.now(UTC)
 
         # 9. Обновляем задачу
         job.status = "completed"
-        job.completed_at = datetime.now()
+        job.completed_at = datetime.now(UTC)
         job.duration_seconds = (job.completed_at - job.started_at).total_seconds()
         session.commit()
 
@@ -119,3 +121,10 @@ def process_asr(media_id: str):
         if temp_audio_path and os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
         session.close()
+
+
+@worker_ready.connect
+def on_worker_ready(**kwargs):
+    """Загружаем модель при старте воркера (в фоне, чтобы не блокировать)"""
+    load_model()
+    print("ASR модель загружена в память воркера")

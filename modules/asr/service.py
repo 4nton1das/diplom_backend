@@ -5,7 +5,6 @@ import soundfile as sf
 import nemo.collections.asr as nemo_asr
 from pathlib import Path
 from modules.asr.config import asr_config
-from modules.asr.utils import get_gpu_usage
 
 _model = None
 
@@ -19,9 +18,6 @@ def load_model():
         if asr_config.device == "cuda" and torch.cuda.is_available():
             _model = _model.cuda()
         print(f"Модель загружена за {time.time()-start:.2f} сек")
-        if torch.cuda.is_available():
-            allocated, total = get_gpu_usage()
-            print(f"GPU память после загрузки: {allocated:.2f}/{total:.2f} GB")
     return _model
 
 
