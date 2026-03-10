@@ -30,7 +30,9 @@ app.include_router(media_router)
 async def startup_event():
     await init_db()
     await create_tables()  # Создаем таблицы, если их нет
-
+    # Синхронная загрузка модели (блокирует)
+    from modules.asr.service import load_model
+    load_model()  # модель загрузится один раз и будет в памяти
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

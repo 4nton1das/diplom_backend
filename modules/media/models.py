@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import String, Integer, Float, Boolean, DateTime, Text, JSON, ForeignKey, Index
+from sqlalchemy import String, Integer, Float, DateTime, Text, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -79,3 +79,17 @@ class ProcessingJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     media: Mapped["Media"] = relationship("Media", back_populates="processing_jobs")
+
+
+class Transcription(Base):
+    __tablename__ = "transcriptions"
+    __table_args__ = {"schema": "media"}
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    media_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("media.media.id", ondelete="CASCADE"), index=True)
+    segments: Mapped[dict] = mapped_column(JSONB)  # список объектов {start, end, text}
+    full_text: Mapped[str] = mapped_column(Text)
+    model_name: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    media: Mapped["Media"] = relationship("Media", backref="transcriptions")

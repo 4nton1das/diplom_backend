@@ -1,5 +1,4 @@
 import hashlib
-import os
 import uuid
 from pathlib import Path
 
@@ -9,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.media.config import media_config
 from modules.media.models import Media, ProcessingJob
-from modules.media.schemas import MediaRead
 
 
 class MediaService:
@@ -73,7 +71,7 @@ class MediaService:
         await self.db.refresh(db_media)
 
         # 7. TODO: запустить Celery задачу для ASR, передав media_id
-        from modules.media.tasks import process_asr
+        from modules.asr.tasks import process_asr
         process_asr.delay(str(media_id))
 
         return db_media
