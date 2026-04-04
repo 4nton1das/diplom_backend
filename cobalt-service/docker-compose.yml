@@ -1,0 +1,14 @@
+services:
+  cobalt-api:
+    image: ghcr.io/imputnet/cobalt:latest
+    restart: unless-stopped
+    container_name: cobalt-api
+    ports:
+      - "9000:9000" # Пробрасываем API на порт 9000
+    environment:
+      # ВАЖНО: Указываем адрес, по которому API будет доступно
+      - API_URL=http://localhost:9000/
+      # Разрешаем скачивание только аудио
+      - ENABLE_AUDIO_ONLY=true
+      # Чтобы твой Vue (порт 5173) мог обращаться напрямую без CORS ошибок
+      - CORS_ALLOWED_ORIGINS=http://localhost:5173

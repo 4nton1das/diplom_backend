@@ -104,9 +104,21 @@ def process_asr(media_id: str):
 
         print(f"ASR completed for media {media_id}, {len(merged)} segments")
 
-        # TODO: запустить LLM задачу
-        # from modules.llm.tasks import process_llm
-        # process_llm.delay(media_id)
+        # 10. Создаем задачу для LLM
+        llm_job = ProcessingJob(
+            id=uuid.uuid4(),
+            media_id=media.id,
+            stage="llm",
+            status="pending"
+        )
+        session.add(llm_job)
+        session.commit()
+
+        # 11. Запускаем LLM задачу
+        from modules.llm.tasks import process_llm
+        process_llm.delay(str(media_id))
+
+        print(f"ASR completed for media {media_id}, LLM task queued")
 
     except Exception as e:
         session.rollback()

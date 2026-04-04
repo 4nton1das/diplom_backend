@@ -3,10 +3,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import uuid
 
 from modules.auth.dependencies import CurrentUser
+from modules.llm.schemas import SummaryRead
 from modules.shared.database import get_db_session
 from modules.media.service import MediaService
 from modules.media.schemas import MediaCreateResponse, MediaRead
-from modules.media.models import Media
+from modules.media.models import Media, Transcription
 
 router = APIRouter(prefix="/media", tags=["media"])
 
@@ -56,3 +57,68 @@ async def get_media_status(
     if not media:
         raise HTTPException(status_code=404, detail="Media not found")
     return media
+
+
+@router.get("/{media_id}/summary", response_model=SummaryRead)
+async def get_summary(
+        media_id: uuid.UUID,
+        current_user: CurrentUser,
+        db: AsyncSession = Depends(get_db_session)
+):
+    """Получить конспект для медиафайла"""
+    from modules.llm.models import Summary
+    from sqlalchemy import select
+
+    result = await db.execute(
+        select(Summary).where(
+            Summary.media_id == media_id,
+            Summary.status == "completed"
+        )
+    )
+    summary = result.scalar_one_or_none()
+
+    if not summary:
+        raise HTTPException(status_code=404, detail="Summary not found or not completed")
+
+    # Проверяем принадлежность пользователю
+    media_result = await db.execute(
+        select(Media).where(Media.id == media_id, Media.user_id == current_user.user_id)
+    )
+    media = media_result.scalar_one_or_none()
+
+    if not media:
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    return summary
+
+
+@router.get("/{media_id}/transcription")
+async def get_transcription(
+        media_id: uuid.UUID,
+        current_user: CurrentUser,
+        db: AsyncSession = Depends(get_db_session)
+):
+    """Получить транскрипцию для медиафайла"""
+    from sqlalchemy import select
+
+    # Проверяем принадлежность
+    media_result = await db.execute(
+        select(Media).where(Media.id == media_id, Media.user_id == current_user.user_id)
+    )
+    media = media_result.scalar_one_or_none()
+
+    if not media:
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    if media.status not in ["transcribed", "summarized"]:
+        raise HTTPException(status_code=400, detail="Transcription not ready")
+
+    trans_result = await db.execute(
+        select(Transcription).where(Transcription.media_id == media_id)
+    )
+    transcription = trans_result.scalar_one_or_none()
+
+    return {
+        "segments": transcription.segments,
+        "full_text": transcription.full_text
+    }

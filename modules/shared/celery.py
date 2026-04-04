@@ -8,7 +8,7 @@ celery_app = Celery(
     include=[
         "modules.media.tasks",
         "modules.asr.tasks",
-        # другие модули
+        "modules.llm.tasks",
     ]
 )
 
