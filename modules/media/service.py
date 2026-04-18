@@ -1,13 +1,13 @@
 import hashlib
 import uuid
-from pathlib import Path
-
-import aiofiles
+import os
+import tempfile
 from fastapi import UploadFile, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
-from modules.media.config import media_config
-from modules.media.models import Media, ProcessingJob
+from modules.media.models import Media, UserMedia, MediaStatus
+from modules.media.storage import s3_storage
 
 
 class MediaService:
@@ -15,63 +15,61 @@ class MediaService:
         self.db = db_session
 
     async def upload_media(self, user_id: uuid.UUID, file: UploadFile) -> Media:
-        # 1. Валидация расширения
-        ext = file.filename.split(".")[-1].lower() if "." in file.filename else ""
-        if ext not in media_config.allowed_extensions:
-            raise HTTPException(status_code=400, detail="Unsupported file format")
-
-        # 2. Генерируем ID и путь с подпапкой пользователя
-        media_id = uuid.uuid4()
-        user_upload_dir = Path(media_config.upload_dir) / str(user_id)
-        user_upload_dir.mkdir(parents=True, exist_ok=True)
-
-        safe_filename = f"{media_id}.{ext}"
-        full_path = user_upload_dir / safe_filename
-
-        # 3. Сохраняем файл и одновременно считаем хэш
+        # 1. Считаем хэш файла прямо в памяти/во временный файл
         sha256 = hashlib.sha256()
+
+        fd, temp_path = tempfile.mkstemp(suffix=".tmp")
         try:
-            async with aiofiles.open(full_path, 'wb') as out_file:
-                while chunk := await file.read(1024 * 1024):  # 1MB chunks
-                    await out_file.write(chunk)
+            with os.fdopen(fd, 'wb') as out_file:
+                while chunk := await file.read(1024 * 1024):
+                    out_file.write(chunk)
                     sha256.update(chunk)
+
+            file_hash = sha256.hexdigest()
+
+            # 2. ДЕДУПЛИКАЦИЯ: Ищем файл по хэшу в БД
+            result = await self.db.execute(select(Media).where(Media.source_id == file_hash))
+            existing_media = result.scalar_one_or_none()
+
+            if existing_media:
+                # Файл уже есть! Просто создаем связь для этого юзера
+                print(f"File {file_hash} already exists. Linking to user.")
+                user_link = UserMedia(user_id=user_id, media_id=existing_media.id)
+                self.db.add(user_link)
+                await self.db.commit()
+                return existing_media
+
+            # 3. Если файла нет - загружаем в MinIO
+            media_id = uuid.uuid4()
+            ext = file.filename.split(".")[-1].lower() if "." in file.filename else "bin"
+            s3_key = f"{file_hash}.{ext}"  # Имя файла в бакете = его хэш
+
+            # Загружаем из временного файла в S3
+            s3_storage.upload_file(temp_path, s3_key)
+
+            # 4. Запись в БД
+            new_media = Media(
+                id=media_id,
+                source_id=file_hash,
+                s3_key=s3_key,
+                status=MediaStatus.PENDING
+            )
+            self.db.add(new_media)
+
+            # Привязываем к юзеру
+            user_link = UserMedia(user_id=user_id, media_id=media_id)
+            self.db.add(user_link)
+
+            await self.db.commit()
+
+            # 5. Запуск Celery
+            from modules.asr.tasks import process_media_task
+            process_media_task.delay(str(media_id))
+
+            return new_media
+
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"File save error: {str(e)}")
-
-        # 4. Получаем размер и хэш
-        file_size = full_path.stat().st_size
-        file_hash = sha256.hexdigest()
-
-        # 5. Запись в БД (новая модель)
-        db_media = Media(
-            id=media_id,
-            user_id=user_id,
-            original_filename=file.filename,
-            file_path=str(full_path),  # относительный путь
-            file_size=file_size,
-            mime_type=file.content_type or "application/octet-stream",
-            checksum=file_hash,
-            status="uploaded",
-            processing_stage=None,  # пока не начали обработку
-            visibility="private"
-        )
-
-        self.db.add(db_media)
-
-        # 6. Создаём задачу для ASR
-        job = ProcessingJob(
-            id=uuid.uuid4(),
-            media_id=media_id,
-            stage="asr",
-            status="pending"
-        )
-        self.db.add(job)
-
-        await self.db.commit()
-        await self.db.refresh(db_media)
-
-        # 7. TODO: запустить Celery задачу для ASR, передав media_id
-        from modules.asr.tasks import process_asr
-        process_asr.delay(str(media_id))
-
-        return db_media
+            raise HTTPException(status_code=500, detail=f"Upload error: {str(e)}")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)

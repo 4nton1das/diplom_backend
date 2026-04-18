@@ -1,71 +1,85 @@
-# modules/asr/tasks.py
 import os
 import shutil
 import tempfile
 import bentoml
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from modules.shared.celery import celery_app
+from modules.media.models import Media, MediaSegment, MediaStatus
+from modules.media.storage import s3_storage
+from modules.media.config import media_config
 from pydub import AudioSegment
 from pydub.utils import make_chunks
-from modules.media.storage import s3_storage  # Теперь этот импорт заработает
 
-# Клиент для связи с микросервисом
+engine = create_engine(media_config.database_url.replace("postgresql+asyncpg", "postgresql"))
+SessionLocal = sessionmaker(bind=engine)
 asr_client = bentoml.SyncHTTPClient("http://localhost:3000")
 
 
 @celery_app.task(bind=True, name="asr.process_media")
-def process_media_task(self, media_id: int, s3_path: str):
-    # tmp_dir — это временная папка на диске твоего ПК (например в AppData/Local/Temp).
-    # Она создается автоматически функцией mkdtemp().
+def process_media_task(self, media_id_str: str):
+    db = SessionLocal()
     tmp_dir = tempfile.mkdtemp()
 
-    # local_file — это путь к файлу внутри этой временной папки.
-    local_file = os.path.join(tmp_dir, "source_media.tmp")
-
     try:
-        # 1. ЗАГРУЗКА ИЗ MINIO
-        s3_storage.download_file(s3_path, local_file)
+        media = db.query(Media).filter(Media.id == media_id_str).first()
+        if not media:
+            return "Media not found"
 
-        self.update_state(state='PROGRESS', meta={'status': 'Downloaded'})
+        # СТАТУС: ПОДГОТОВКА
+        media.status = MediaStatus.PREPARING
+        db.commit()
 
-        # 2. НАРЕЗКА
+        local_file = os.path.join(tmp_dir, "input_file")
+        s3_storage.download_file(media.s3_key, local_file)
+
         audio = AudioSegment.from_file(local_file).set_channels(1).set_frame_rate(16000)
-        chunks = make_chunks(audio, 30000)  # по 30 секунд
+        chunks = make_chunks(audio, 30000)
 
-        chunk_paths = []
         for i, chunk in enumerate(chunks):
-            cp = os.path.join(tmp_dir, f"chunk_{i}.wav")
-            chunk.export(cp, format="wav")
-            chunk_paths.append(cp)
+            chunk_path = os.path.join(tmp_dir, f"chunk_{i}.wav")
+            chunk.export(chunk_path, format="wav")
+            new_seg = MediaSegment(media_id=media.id, position=i)
+            db.add(new_seg)
+        db.commit()
 
-        # 3. ИНФЕРЕНС ПАЧКАМИ
-        final_text_parts = []
-        total = len(chunk_paths)
+        # СТАТУС: ТРАНСКРИПЦИЯ
+        media.status = MediaStatus.TRANSCRIBING
+        db.commit()
 
-        for i in range(0, total, 8):
-            batch = chunk_paths[i:i + 8]
+        all_segments = db.query(MediaSegment).filter(MediaSegment.media_id == media_id_str).order_by(
+            MediaSegment.position).all()
+        final_texts = []
 
-            # ИСПРАВЛЕНО: В BentoML SyncHTTPClient метод вызывается через .call()
-            batch_res = asr_client.call("transcribe", paths=batch)
+        for j in range(0, len(all_segments), 8):
+            batch = all_segments[j:j + 8]
+            paths = [os.path.join(tmp_dir, f"chunk_{seg.position}.wav") for seg in batch]
 
-            for res in batch_res:
-                final_text_parts.append(res["text"])
+            results = asr_client.call("transcribe", paths=paths)
 
-            percent = int(((i + len(batch)) / total) * 100)
-            self.update_state(state='PROGRESS', meta={'percent': percent})
-            print(f"Media {media_id}: {percent}% готово")
+            for seg, res in zip(batch, results):
+                seg.text = res["text"]
+                final_texts.append(res["text"])
 
-        # 4. ФИНАЛИЗАЦИЯ
-        full_transcription = " ".join(final_text_parts)
+            db.commit()
 
-        # Печатаем результат, чтобы IDE не ругалась на неиспользуемую переменную
-        print(f"Транскрипция завершена. Длина: {len(full_transcription)} симв.")
+            percent = int(((j + len(batch)) / len(all_segments)) * 100)
+            # Отправляем инфо в RabbitMQ/Redis для фронта
+            self.update_state(state='PROGRESS', meta={'stage': 'transcribing', 'percent': percent})
 
-        # В ДАЛЬНЕЙШЕМ: здесь будет вызов update_db(media_id, full_transcription)
-        return {"status": "SUCCESS", "text_snippet": full_transcription[:100]}
+        # Записываем полный текст и завершаем
+        media.full_text = " ".join(final_texts)
+        media.status = MediaStatus.COMPLETED
+        db.commit()
+
+        return {"status": "SUCCESS"}
 
     except Exception as e:
-        print(f"ОШИБКА ВОРКЕРА: {e}")
+        if 'media' in locals() and media:
+            media.status = MediaStatus.FAILED
+            db.commit()
         raise e
     finally:
-        # Удаляем временную папку и все чанки внутри неё
+        db.close()
         shutil.rmtree(tmp_dir, ignore_errors=True)

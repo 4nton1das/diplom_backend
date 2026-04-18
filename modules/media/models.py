@@ -1,95 +1,64 @@
-# modules/media/models.py
+import enum
 import uuid
-from datetime import datetime
-from typing import Optional
-from sqlalchemy import String, Integer, Float, DateTime, Text, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Column, String, ForeignKey, DateTime, Enum, Text, Integer
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-
 from modules.shared.database import Base
 
 
+class MediaStatus(enum.Enum):
+    PENDING = "pending"  # Добавлен в базу
+    DOWNLOADING = "downloading"  # Скачивается (для Cobalt)
+    PREPARING = "preparing"  # Нарезка и конвертация
+    TRANSCRIBING = "transcribing"  # ASR в работе
+    SUMMARIZING = "summarizing"  # LLM в работе (на будущее)
+    COMPLETED = "completed"  # Полностью готов
+    FAILED = "failed"  # Ошибка на любом этапе
+
+
 class Media(Base):
+    """Физический медиа-файл и его глобальные метаданные"""
     __tablename__ = "media"
     __table_args__ = {"schema": "media"}
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Хэш файла (SHA256) или ID из Rutube. Ключ для дедупликации!
+    source_id = Column(String(255), unique=True, index=True)
+    s3_key = Column(String(512))  # Путь в MinIO (например, hash.mp3)
+    status = Column(Enum(MediaStatus), default=MediaStatus.PENDING)
 
-    # Файловые метаданные
-    original_filename: Mapped[str] = mapped_column(String(512))
-    file_path: Mapped[str] = mapped_column(String(1024))          # относительный путь: uploads/{user_id}/{file_id}.ext
-    file_size: Mapped[int] = mapped_column(Integer)               # в байтах
-    mime_type: Mapped[str] = mapped_column(String(100))
-    checksum: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)  # SHA256
+    # Общий транскрипт (собирается воркером в конце)
+    full_text = Column(Text, nullable=True)
 
-    # Медиа-метаданные (извлекаются позже)
-    duration: Mapped[Optional[int]] = mapped_column(Integer)     # в секундах
-    format: Mapped[Optional[str]] = mapped_column(String(50))    # например, 'mp4', 'mp3'
-
-    # Аудио метаданные
-    sample_rate: Mapped[Optional[int]] = mapped_column(Integer)
-    channels: Mapped[Optional[int]] = mapped_column(Integer)
-    audio_codec: Mapped[Optional[str]] = mapped_column(String(50))
-
-    # Видео метаданные
-    width: Mapped[Optional[int]] = mapped_column(Integer)
-    height: Mapped[Optional[int]] = mapped_column(Integer)
-    fps: Mapped[Optional[float]] = mapped_column(Float)
-    video_codec: Mapped[Optional[str]] = mapped_column(String(50))
-
-    # Статус обработки
-    status: Mapped[str] = mapped_column(String(50), default="uploaded")  # uploaded → processing → transcribed → summarized → failed
-    processing_stage: Mapped[Optional[str]] = mapped_column(String(50))  # 'media', 'asr', 'llm'
-    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    # Видимость
-    visibility: Mapped[str] = mapped_column(String(20), default="private")  # private, public
-
-    # Временные метки
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), onupdate=func.now())
-    processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-
-    # Связи
-    processing_jobs: Mapped[list["ProcessingJob"]] = relationship("ProcessingJob", back_populates="media", cascade="all, delete-orphan")
-
-    def __repr__(self):
-        return f"<Media {self.id} - {self.original_filename}>"
+    segments = relationship("MediaSegment", back_populates="media", cascade="all, delete-orphan")
+    user_media = relationship("UserMedia", back_populates="media", cascade="all, delete-orphan")
 
 
-class ProcessingJob(Base):
-    __tablename__ = "processing_jobs"
+class UserMedia(Base):
+    """Связь пользователя и медиа (у одного файла может быть много владельцев)"""
+    __tablename__ = "user_media"
     __table_args__ = {"schema": "media"}
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    media_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("media.media.id", ondelete="CASCADE"), index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"))
+    media_id = Column(UUID(as_uuid=True), ForeignKey("media.media.id", ondelete="CASCADE"))
 
-    stage: Mapped[str] = mapped_column(String(50))           # 'asr', 'llm'
-    status: Mapped[str] = mapped_column(String(50))          # 'pending', 'processing', 'completed', 'failed'
-    celery_task_id: Mapped[Optional[str]] = mapped_column(String(255))
+    # Индивидуальный конспект пользователя
+    summary = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
 
-    # Метрики
-    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    duration_seconds: Mapped[Optional[float]] = mapped_column(Float)
-    error_message: Mapped[Optional[str]] = mapped_column(Text)
-
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    media: Mapped["Media"] = relationship("Media", back_populates="processing_jobs")
+    media = relationship("Media", back_populates="user_media")
 
 
-class Transcription(Base):
-    __tablename__ = "transcriptions"
+class MediaSegment(Base):
+    """Нарезанные чанки для ASR"""
+    __tablename__ = "media_segments"
     __table_args__ = {"schema": "media"}
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    media_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("media.media.id", ondelete="CASCADE"), index=True)
-    segments: Mapped[dict] = mapped_column(JSONB)  # список объектов {start, end, text}
-    full_text: Mapped[str] = mapped_column(Text)
-    model_name: Mapped[str] = mapped_column(String(100))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    media_id = Column(UUID(as_uuid=True), ForeignKey("media.media.id", ondelete="CASCADE"))
+    position = Column(Integer)  # 0, 1, 2...
+    text = Column(Text, nullable=True)
 
-    media: Mapped["Media"] = relationship("Media", backref="transcriptions")
+    media = relationship("Media", back_populates="segments")
