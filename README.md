@@ -148,7 +148,7 @@ uvicorn main:app --reload
 
 ### Запуск Celery воркера (на Windows используем solo-пул)
 ```bash
-celery -A modules.shared.celery.celery_app worker --loglevel=info --pool=solo
+celery -A modules.shared.celery worker --loglevel=info --pool=solo
 ```
 
 ### Миграции БД

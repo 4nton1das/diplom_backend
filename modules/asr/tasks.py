@@ -1,142 +1,71 @@
+# modules/asr/tasks.py
 import os
-import uuid
-from datetime import datetime, UTC
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
-from modules.asr.config import asr_config
-from modules.asr.service import transcribe_segments, split_audio, load_model
-from modules.auth.models import User
-from modules.media.models import Media, ProcessingJob, Transcription
-from modules.shared.database import db_settings
+import shutil
+import tempfile
+import bentoml
 from modules.shared.celery import celery_app
-from celery.signals import worker_ready
-import librosa
+from pydub import AudioSegment
+from pydub.utils import make_chunks
+from modules.media.storage import s3_storage  # Теперь этот импорт заработает
 
-# Синхронный engine для Celery
-SYNC_DATABASE_URL = db_settings.database_url.replace("+asyncpg", "")
-sync_engine = create_engine(SYNC_DATABASE_URL)
-SyncSession = sessionmaker(bind=sync_engine)
+# Клиент для связи с микросервисом
+asr_client = bentoml.SyncHTTPClient("http://localhost:3000")
 
 
-@celery_app.task
-def process_asr(media_id: str):
-    session = SyncSession()
-    temp_audio_path = None  # для возможной очистки
+@celery_app.task(bind=True, name="asr.process_media")
+def process_media_task(self, media_id: int, s3_path: str):
+    # tmp_dir — это временная папка на диске твоего ПК (например в AppData/Local/Temp).
+    # Она создается автоматически функцией mkdtemp().
+    tmp_dir = tempfile.mkdtemp()
+
+    # local_file — это путь к файлу внутри этой временной папки.
+    local_file = os.path.join(tmp_dir, "source_media.tmp")
+
     try:
-        # Находим запись Media
-        media = session.get(Media, uuid.UUID(media_id))
-        if not media:
-            print(f"Media {media_id} not found")
-            return
+        # 1. ЗАГРУЗКА ИЗ MINIO
+        s3_storage.download_file(s3_path, local_file)
 
-        # Находим соответствующую задачу ProcessingJob для этапа asr
-        job = session.execute(
-            select(ProcessingJob).where(
-                ProcessingJob.media_id == media_id,
-                ProcessingJob.stage == "asr"
-            )
-        ).scalar_one_or_none()
+        self.update_state(state='PROGRESS', meta={'status': 'Downloaded'})
 
-        if not job:
-            print(f"ProcessingJob for media {media_id} not found")
-            return
+        # 2. НАРЕЗКА
+        audio = AudioSegment.from_file(local_file).set_channels(1).set_frame_rate(16000)
+        chunks = make_chunks(audio, 30000)  # по 30 секунд
 
-        # Обновляем статус задачи
-        job.status = "processing"
-        job.started_at = datetime.now(UTC)
-        session.commit()
+        chunk_paths = []
+        for i, chunk in enumerate(chunks):
+            cp = os.path.join(tmp_dir, f"chunk_{i}.wav")
+            chunk.export(cp, format="wav")
+            chunk_paths.append(cp)
 
-        # 1. Загружаем аудио из файла (librosa сама извлечёт из видео, если надо)
-        print(f"Загрузка аудио из {media.file_path}")
-        audio, sr = librosa.load(media.file_path, sr=asr_config.sample_rate, mono=True)
+        # 3. ИНФЕРЕНС ПАЧКАМИ
+        final_text_parts = []
+        total = len(chunk_paths)
 
-        # 2. Разбиваем на технические сегменты с перекрытием
-        segments = split_audio(
-            audio, sr,
-            segment_length=asr_config.segment_length,
-            overlap=asr_config.overlap_seconds
-        )
-        # segments - список кортежей (start, end)
+        for i in range(0, total, 8):
+            batch = chunk_paths[i:i + 8]
 
-        # 3. Транскрибируем сегменты
-        all_segments = transcribe_segments(
-            audio, sr, segments,
-            temp_dir=asr_config.temp_dir
-        )
+            # ИСПРАВЛЕНО: В BentoML SyncHTTPClient метод вызывается через .call()
+            batch_res = asr_client.call("transcribe", paths=batch)
 
-        # 4. Сортируем по времени начала
-        all_segments.sort(key=lambda x: x['start'])
+            for res in batch_res:
+                final_text_parts.append(res["text"])
 
-        # 5. Простая дедупликация перекрывающихся сегментов (можно улучшить)
-        merged = []
-        prev = None
-        for seg in all_segments:
-            if prev and seg['start'] < prev['end'] + 0.5:
-                # если текст похож, пропускаем
-                if seg['text'] in prev['text'] or prev['text'] in seg['text']:
-                    continue
-            merged.append(seg)
-            prev = seg
+            percent = int(((i + len(batch)) / total) * 100)
+            self.update_state(state='PROGRESS', meta={'percent': percent})
+            print(f"Media {media_id}: {percent}% готово")
 
-        # 6. Полный текст
-        full_text = " ".join([s['text'] for s in merged])
+        # 4. ФИНАЛИЗАЦИЯ
+        full_transcription = " ".join(final_text_parts)
 
-        # 7. Сохраняем транскрипцию
-        trans = Transcription(
-            id=uuid.uuid4(),
-            media_id=media.id,
-            segments=merged,  # JSONB
-            full_text=full_text,
-            model_name=asr_config.model_name
-        )
-        session.add(trans)
+        # Печатаем результат, чтобы IDE не ругалась на неиспользуемую переменную
+        print(f"Транскрипция завершена. Длина: {len(full_transcription)} симв.")
 
-        # 8. Обновляем статус Media
-        media.status = "transcribed"
-        media.processing_stage = None
-        media.updated_at = datetime.now(UTC)
-
-        # 9. Обновляем задачу
-        job.status = "completed"
-        job.completed_at = datetime.now(UTC)
-        job.duration_seconds = (job.completed_at - job.started_at).total_seconds()
-        session.commit()
-
-        print(f"ASR completed for media {media_id}, {len(merged)} segments")
-
-        # 10. Создаем задачу для LLM
-        llm_job = ProcessingJob(
-            id=uuid.uuid4(),
-            media_id=media.id,
-            stage="llm",
-            status="pending"
-        )
-        session.add(llm_job)
-        session.commit()
-
-        # 11. Запускаем LLM задачу
-        from modules.llm.tasks import process_llm
-        process_llm.delay(str(media_id))
-
-        print(f"ASR completed for media {media_id}, LLM task queued")
+        # В ДАЛЬНЕЙШЕМ: здесь будет вызов update_db(media_id, full_transcription)
+        return {"status": "SUCCESS", "text_snippet": full_transcription[:100]}
 
     except Exception as e:
-        session.rollback()
-        if 'job' in locals() and job:
-            job.status = "failed"
-            job.error_message = str(e)
-            session.commit()
-        print(f"ASR failed for media {media_id}: {e}")
-        raise
+        print(f"ОШИБКА ВОРКЕРА: {e}")
+        raise e
     finally:
-        # Очистка временных файлов (transcribe_segments уже удаляет свои, но на всякий случай)
-        if temp_audio_path and os.path.exists(temp_audio_path):
-            os.remove(temp_audio_path)
-        session.close()
-
-
-@worker_ready.connect
-def on_worker_ready(**kwargs):
-    """Загружаем модель при старте воркера (в фоне, чтобы не блокировать)"""
-    load_model()
-    print("ASR модель загружена в память воркера")
+        # Удаляем временную папку и все чанки внутри неё
+        shutil.rmtree(tmp_dir, ignore_errors=True)
