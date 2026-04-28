@@ -28,5 +28,3 @@ dependencies = [
     "uvicorn>=0.40.0",
     "yt-dlp>=2025.12.8",
 ]
-
-# 1.42.70

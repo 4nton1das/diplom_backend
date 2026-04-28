@@ -1,7 +1,7 @@
 import enum
 import uuid
-from sqlalchemy import Column, String, ForeignKey, DateTime, Enum, Text, Integer
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, ForeignKey, DateTime, Enum, Text, Integer, Float
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from modules.shared.database import Base
@@ -58,7 +58,15 @@ class MediaSegment(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     media_id = Column(UUID(as_uuid=True), ForeignKey("media.media.id", ondelete="CASCADE"))
-    position = Column(Integer)  # 0, 1, 2...
+    position = Column(Integer)
+
+    # Временные метки (в секундах от начала файла)
+    start_time = Column(Float, nullable=True)
+    end_time = Column(Float, nullable=True)
+
     text = Column(Text, nullable=True)
+
+    # Детальные таймкоды слов: [{"word": "Привет", "start": 0.5, "end": 0.8}, ...]
+    words = Column(JSONB, nullable=True)
 
     media = relationship("Media", back_populates="segments")
