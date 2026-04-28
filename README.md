@@ -3,77 +3,164 @@
 ## Дипломная работа
 **Тема:** Разработка веб-приложения для создания интерактивных конспектов на основе медиаданных.
 
-**Идея:** Пользователь загружает видео/аудиофайл или ссылку на YouTube, система автоматически транскрибирует речь (ASR), а затем с помощью LLM генерирует структурированный конспект с временными метками. Конспект может быть отредактирован, сохранен, а также возможна навигация по исходному видео/аудио через временные метки.
+**Идея:** Пользователь загружает медиафайл или ссылку на Rutube. Система извлекает аудио (через Cobalt), сохраняет его в объектное хранилище MinIO, транскрибирует речь через локальный ASR-сервис, а затем с помощью LLM генерирует структурированный конспект с временными метками.
 
-Проект представляет собой **модульный монолит** с event-driven архитектурой, ориентированный на обработку длительных задач (транскрипция, генерация текста) через очередь Celery. Взаимодействие модулей осуществляется через события (задачи Celery), что обеспечивает слабую связанность и масштабируемость.
+Проект построен на базе архитектуры микросервисов и модульного монолита, взаимодействующих через асинхронные очереди (Celery/Redis) и gRPC/HTTP протоколы. Это обеспечивает масштабируемость тяжелых вычислительных задач (ASR/LLM) отдельно от API-сервера.
 
-## Используемые технологии
-- **Backend:** Python 3.12, FastAPI, SQLAlchemy 2.0 (async), Alembic (планируется)
-- **База данных:** PostgreSQL 15+ (схемы `auth`, `media`)
-- **Аутентификация:** JWT (access + refresh токены), HttpOnly cookies, bcrypt
-- **Очереди и события:** Celery 5.6, Redis (брокер и бэкенд результатов)
-- **Модели ASR:** NVIDIA NeMo (parakeet-tdt-0.6b-v3), CUDA, PyTorch
-- **Обработка аудио/видео:** librosa, ffmpeg, soundfile
-- **Дополнительно:** pydantic-settings, aiofiles, python-dotenv
-- **Инфраструктура:** Docker (для Redis), возможна контейнеризация всего проекта
+## Технологический стек
+
+### Backend
+| Технология     | Версия  | Назначение               |
+|----------------|---------|--------------------------|
+| **Python**     | 3.12+   | Язык программирования    |
+| **FastAPI**    | 0.128.0 | Веб-фреймворк (API)      |
+| **SQLAlchemy** | 2.0.46  | ORM (асинхронная)        |
+| **Pydantic**   | 2.12.5  | Валидация данных         |
+| **Celery**     | 5.6.2   | Очереди задач            |
+| **Redis**      | 7.2.1   | Брокер сообщений + кэш   |
+| **PostgreSQL** | 16      | Реляционная БД           |
+| **MinIO**      | latest  | S3-совместимое хранилище |
+
+### Frontend
+| Технология       | Версия | Назначение                |
+|------------------|--------|---------------------------|
+| **Vue.js**       | 3.x    | Реактивный фреймворк      |
+| **Tailwind CSS** | 3.x    | Утилитарный CSS-фреймворк |
+| **TypeScript**   | 5.x    | Типизация                 |
+| **Pinia**        | 2.x    | State management          |
+
+### ML & AI
+| Компонент       | Технология               | Описание                               |
+|-----------------|--------------------------|----------------------------------------|
+| **ASR**         | NVIDIA Parakeet-TDT 0.6B | Локальная модель распознавания речи    |
+| **ASR Serving** | BentoML                  | Динамический батчинг, оптимизация GPU  |
+| **LLM**         | DeepSeek / GigaChat API  | Суммаризация и структурирование текста |
+
+### Инфраструктура
+- **Docker** + **Docker Compose** — контейнеризация
+- **Cobalt** (локально) — извлечение ссылок на аудио
+- **JWT** — аутентификация (access + refresh токены)
+- **WebSocket** — обновление статуса в реальном времени
+
+---
 
 ## Архитектура проекта
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Frontend  │────▶│  FastAPI    │────▶│  PostgreSQL │
-│   (Vue 3)   │◀────│  (модули)   │◀────│             │
-└─────────────┘     └──────┬──────┘     └─────────────┘
-                           │
-                           ▼
-                    ┌─────────────┐     ┌─────────────┐
-                    │   Redis     │◀────│   Celery    │
-                    │  (брокер)   │────▶│  (воркеры)  │
-                    └─────────────┘     └─────────────┘
-                                                │
-                                                ▼
-                                         ┌─────────────┐
-                                         │   Модели    │
-                                         │  ASR / LLM  │
-                                         └─────────────┘
+```mermaid
+graph TB
+    subgraph Client["🖥️ Клиентская сторона (User's Machine)"]
+        FE["Frontend<br/>Vue3 + Tailwind CSS"]
+        Cobalt["Local Cobalt Service<br/>Docker Container"]
+    end
+    
+    subgraph Server["🌐 Серверная сторона"]
+        Backend["Backend API<br/>FastAPI"]
+        
+        subgraph Storage["Хранилища"]
+            Redis["Redis<br/>Cache & Message Broker"]
+            PostgreSQL["PostgreSQL<br/>Database"]
+            MinIO["MinIO S3<br/>Object Storage"]
+        end
+        
+        subgraph Workers["Фоновая обработка"]
+            Celery1["Celery Worker #1"]
+            Celery2["Celery Worker #N"]
+        end
+        
+        ASR["ASR Microservice<br/>BentoML + NVIDIA Parakeet"]
+    end
+    
+    %% Client connections
+    FE <-->|HTTP/HTTPS JSON| Backend
+    FE <-->|Local HTTP| Cobalt
+    
+    %% Backend connections
+    Backend <-->|SQL| PostgreSQL
+    Backend <-->|S3 API| MinIO
+    Backend <-->|Pub/Sub & Cache| Redis
+    Backend <-->|gRPC/HTTP| ASR
+    
+    %% Celery connections
+    Redis -->|Task Queue PUSH/POP| Celery1
+    Redis -->|Task Queue PUSH/POP| Celery2
+    Celery1 -.->|Save Result| PostgreSQL
+    Celery2 -.->|Save Result| PostgreSQL
+    
+    %% Styling
+    classDef client fill:#dbeafe,stroke:#3b82f6,stroke-width:2px
+    classDef server fill:#d1fae5,stroke:#10b981,stroke-width:2px
+    classDef storage fill:#f3f4f6,stroke:#6b7280,stroke-width:2px
+    classDef workers fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
+    classDef asr fill:#fed7aa,stroke:#f97316,stroke-width:2px
+    
+    class FE,Cobalt client
+    class Backend server
+    class Redis,PostgreSQL,MinIO storage
+    class Celery1,Celery2 workers
+    class ASR asr
 ```
 
-- **Модуль `auth`** – регистрация, вход, JWT, управление подписками.
-- **Модуль `media`** – загрузка файлов, валидация, сохранение на диск, запись в БД, создание задачи на ASR.
-- **Модуль `asr`** – получение задачи, загрузка аудио, сегментация, транскрипция через модель Parakeet, сохранение результатов.
-- **Модуль `llm`** (в разработке) – генерация конспекта на основе транскрипции.
-- **Общая шина событий** – реализована через задачи Celery; в будущем может быть дополнена Redis Pub/Sub.
+### Поток данных (Video-to-Transcript)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 👤 Пользователь
+    participant FE as Frontend<br/>(Vue3)
+    participant Cobalt as Cobalt<br/>(Local Docker)
+    participant API as Backend API<br/>(FastAPI)
+    participant S3 as MinIO S3
+    participant Redis as Redis
+    participant DB as PostgreSQL
+    participant Celery as Celery Worker
+    participant ASR as ASR Service<br/>(BentoML)
+    participant LLM as LLM API<br/>(DeepSeek)
+    
+    Note over User,LLM: 📥 Этап 1: Загрузка и извлечение аудио
+    
+    User->>FE: Вводит ссылку на видео
+    FE->>Cobalt: GET /extract?url=...
+    Cobalt->>FE: Ссылка на аудио
+    FE->>FE: Скачивает аудио
+    FE->>API: POST /api/media/upload
+    API->>S3: Сохраняет файл
+    API->>DB: CREATE task (queued)
+    API->>Redis: PUSH task_id
+    API-->>FE: 201 Created
+    
+    Note over User,LLM: ⚙️ Этап 2: Асинхронная обработка
+    
+    Celery->>Redis: POP task_id
+    Celery->>DB: UPDATE (processing)
+    Celery->>S3: GET audio file
+    Celery->>ASR: gRPC transcribe(audio)
+    ASR-->>Celery: transcript + timestamps
+    Celery->>LLM: POST summarize(transcript)
+    LLM-->>Celery: structured summary
+    Celery->>DB: UPDATE (completed)
+    
+    Note over User,LLM: 📤 Этап 3: Получение результата
+    
+    FE->>API: GET /api/media/{id}/transcript
+    API->>DB: SELECT transcript + summary
+    API-->>FE: JSON с конспектом
+    FE-->>User: Интерактивный конспект
+```
 
 ## Структура проекта (бэкенд)
 
 ```
 modules/
-├── auth/               # Аутентификация и пользователи
-│   ├── config.py
-│   ├── dependencies.py
-│   ├── events.py
-│   ├── models.py       # User, RefreshToken
-│   ├── router.py       # /auth/... эндпоинты
-│   ├── schemas.py      # Pydantic модели
-│   └── service.py      # логика
-├── media/              # Загрузка и управление медиафайлами
-│   ├── config.py
-│   ├── models.py       # Media, ProcessingJob, Transcription
-│   ├── router.py       # /media/... эндпоинты
-│   ├── schemas.py
-│   ├── service.py      # загрузка файла, создание задачи
-│   └── tasks.py        # синхронная сессия для Celery (если нужно)
-├── asr/                 # Модуль распознавания речи
-│   ├── config.py
-│   ├── service.py      # загрузка модели, транскрипция сегментов
-│   ├── tasks.py        # Celery задача process_asr
-│   └── utils.py        # вспомогательные функции (GPU, аудио)
-├── llm/                 # Модуль генерации конспектов (планируется)
-│   └── ...
-└── shared/              # Общие компоненты
-    ├── database.py      # настройки БД, async сессия, Base
-    ├── event_bus.py     # in-memory шина (временно)
-    └── celery.py        # общий экземпляр Celery
+├── auth/               # Управление пользователями и доступом
+├── media/              # Роутеры загрузки, интеграция с S3 (MinIO)
+│   ├── storage.py      # Клиент S3Storage
+│   ├── tasks.py        # Celery таски для БД
+│   └── service.py      # Логика обработки медиаданных
+├── asr/                # Взаимодействие с ASR сервисом
+│   ├── service.py      # Клиент для BentoML (HTTP/gRPC)
+│   └── tasks.py        # Celery задача process_media (нарезка, вызов ASR)
+├── llm/                # Генерация конспектов через DeepSeek API
+└── shared/             # Общие ресурсы (DB session, Celery app, EventBus)
 ```
 
 ## Реализованные возможности
@@ -112,44 +199,25 @@ modules/
 - ✅ Переменные окружения через `.env` (поддерживаются `DATABASE_URL`, `CELERY_*` и др.)
 
 ## Запуск проекта (локальная разработка)
-
 ### Требования
+- Docker & Docker Compose (для Redis, MinIO, Cobalt)
 - Python 3.12+
-- PostgreSQL (например, через Docker)
-- Redis (брокер Celery)
-- CUDA и драйверы NVIDIA (для GPU-ускорения ASR, опционально)
-- FFmpeg (в PATH)
+- FFmpeg
 
 ### Установка
-```bash
-git clone <repository>
-cd modules
-python -m venv .venv
-source .venv/bin/activate  # или .venv\Scripts\activate на Windows
-uv sync
-```
+1. Клонировать репозиторий.
+2. Установить зависимости: `uv sync`.
+3. Запустить инфраструктуру: `docker-compose up -d`.
+4. Настроить `.env` (параметры БД, S3 и API ключи).
 
-### Конфигурация
-Создайте файл `.env` в корне:
-```
-DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/diplom
-SECRET_KEY=...
-VERIFICATION_SECRET=...
-RESET_PASSWORD_SECRET=...
-CELERY_REDIS_URL=redis://localhost:6379/0
-CELERY_BROKER_URL=redis://localhost:6379/0
-CELERY_RESULT_BACKEND=redis://localhost:6379/0
-```
-
-### Запуск сервера FastAPI
+### Запуск компонентов
 ```bash
+# FastAPI сервер
 uvicorn main:app --reload
-```
 
-### Запуск Celery воркера (на Windows используем solo-пул)
-```bash
+# Celery воркер (обработка задач)
 celery -A modules.shared.celery worker --loglevel=info --pool=solo
-```
 
-### Миграции БД
-Пока таблицы создаются автоматически при старте (`init_db`). В будущем планируется подключение Alembic.
+# ASR сервис
+bentoml serve asr_service:latest
+```
