@@ -122,6 +122,9 @@ class LLMService:
         await self.db.refresh(summary)
         await self.db.refresh(job)
 
+        from modules.llm.tasks import process_summary_task
+        process_summary_task.delay(str(job.id), str(summary.id))
+
         return summary, job
 
     async def get_summary_for_user(
