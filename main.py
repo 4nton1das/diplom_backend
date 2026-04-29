@@ -5,6 +5,7 @@ import uvicorn
 
 from modules.auth.router import router as auth_router
 from modules.media.router import router as media_router
+from modules.llm.router import router as llm_router
 from modules.auth.config import auth_config
 from modules.shared.database import init_db, create_tables
 
@@ -23,6 +24,7 @@ app.add_middleware(
 # Подключаем роутеры
 app.include_router(auth_router)
 app.include_router(media_router)
+app.include_router(llm_router)
 
 
 # События при старте

@@ -5,13 +5,14 @@
 from modules.auth.models import User, RefreshToken
 
 # Media models
-from modules.media.models import Media, UserMedia, MediaSegment
+from modules.media.models import Media, UserMedia, MediaSegment, ProcessingJob, ProcessingStage
 
 # LLM models
-from modules.llm.models import Summary
+from modules.llm.models import Summary, SummaryChunk
 
 __all__ = [
     "User", "RefreshToken",
     "Media", "UserMedia", "MediaSegment",
-    "Summary"
+    "ProcessingJob", "ProcessingStage",
+    "Summary", "SummaryChunk"
 ]

@@ -6,7 +6,7 @@ from fastapi import UploadFile, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from modules.media.models import Media, UserMedia, MediaStatus
+from modules.media.models import Media, UserMedia, MediaStatus, ProcessingJob
 from modules.media.storage import s3_storage
 
 
@@ -32,11 +32,20 @@ class MediaService:
             existing_media = result.scalar_one_or_none()
 
             if existing_media:
-                # Файл уже есть! Просто создаем связь для этого юзера
                 print(f"File {file_hash} already exists. Linking to user.")
-                user_link = UserMedia(user_id=user_id, media_id=existing_media.id)
-                self.db.add(user_link)
-                await self.db.commit()
+
+                link_result = await self.db.execute(
+                    select(UserMedia).where(
+                        UserMedia.user_id == user_id,
+                        UserMedia.media_id == existing_media.id,
+                    )
+                )
+                existing_link = link_result.scalar_one_or_none()
+
+                if not existing_link:
+                    self.db.add(UserMedia(user_id=user_id, media_id=existing_media.id))
+                    await self.db.commit()
+
                 return existing_media
 
             # 3. Если файла нет - загружаем в MinIO
@@ -56,15 +65,25 @@ class MediaService:
             )
             self.db.add(new_media)
 
+            asr_job = ProcessingJob(
+                media_id=media_id,
+                user_id=None,
+                job_type="asr",
+                status="pending",
+                progress=0,
+            )
+            self.db.add(asr_job)
+
             # Привязываем к юзеру
             user_link = UserMedia(user_id=user_id, media_id=media_id)
             self.db.add(user_link)
 
             await self.db.commit()
+            await self.db.refresh(asr_job)
 
             # 5. Запуск Celery
             from modules.asr.tasks import process_media_task
-            process_media_task.delay(str(media_id))
+            process_media_task.delay(str(media_id), str(asr_job.id))
 
             return new_media
 
