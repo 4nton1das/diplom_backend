@@ -51,19 +51,20 @@ class LLMService:
         return media
 
     async def create_summary_job(
-        self,
-        user_id: uuid.UUID,
-        media_id: uuid.UUID,
+            self,
+            user_id: uuid.UUID,
+            media_id: uuid.UUID,
     ) -> tuple[Summary, ProcessingJob]:
         """
-        Создает пользовательский конспект и summary-job.
+        Создает или перегенерирует пользовательский конспект.
 
-        Пока это только подготовка:
-        - Summary.status = pending
-        - ProcessingJob.status = pending
-        - stages llm_map / llm_reduce = pending
-
-        Реальный запуск Celery LLM добавим следующим шагом.
+        Логика:
+        - один user + media = один актуальный Summary;
+        - при перегенерации Summary переиспользуется;
+        - создаётся новый ProcessingJob;
+        - старый content очищается;
+        - старые SummaryChunk удаляются;
+        - новый результат LLM запишется в тот же Summary.
         """
         media = await self.check_user_has_media_access(user_id, media_id)
 
@@ -79,6 +80,14 @@ class LLMService:
                 detail="ASR transcript is empty",
             )
 
+        summary_result = await self.db.execute(
+            select(Summary).where(
+                Summary.user_id == user_id,
+                Summary.media_id == media_id,
+            )
+        )
+        summary = summary_result.scalar_one_or_none()
+
         job = ProcessingJob(
             media_id=media_id,
             user_id=user_id,
@@ -89,17 +98,44 @@ class LLMService:
         self.db.add(job)
         await self.db.flush()
 
-        summary = Summary(
-            media_id=media_id,
-            user_id=user_id,
-            job_id=job.id,
-            status=SummaryStatus.pending.value,
-            content=None,
-            model_name=None,
-            provider=None,
-            prompt_version=None,
-        )
-        self.db.add(summary)
+        if summary:
+            summary.job_id = job.id
+            summary.status = SummaryStatus.pending.value
+            summary.content = None
+            summary.content_json = None
+            summary.title = None
+            summary.model_name = None
+            summary.provider = None
+            summary.prompt_version = None
+            summary.tokens_input = None
+            summary.tokens_output = None
+            summary.tokens_total = None
+            summary.error_message = None
+            summary.completed_at = None
+
+            # Удаляем старые чанки этого summary.
+            from modules.llm.models import SummaryChunk
+
+            chunks_result = await self.db.execute(
+                select(SummaryChunk).where(SummaryChunk.summary_id == summary.id)
+            )
+            old_chunks = chunks_result.scalars().all()
+
+            for chunk in old_chunks:
+                await self.db.delete(chunk)
+
+        else:
+            summary = Summary(
+                media_id=media_id,
+                user_id=user_id,
+                job_id=job.id,
+                status=SummaryStatus.pending.value,
+                content=None,
+                model_name=None,
+                provider=None,
+                prompt_version=None,
+            )
+            self.db.add(summary)
 
         self.db.add_all([
             ProcessingStage(

@@ -45,7 +45,14 @@ class Summary(Base):
     - Summary создается через ProcessingJob(job_type='summary')
     """
     __tablename__ = "summaries"
-    __table_args__ = {"schema": "media"}
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "media_id",
+            name="uq_summaries_user_id_media_id",
+        ),
+        {"schema": "media"},
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
