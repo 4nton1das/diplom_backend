@@ -1,223 +1,734 @@
-# VideoSummarizer Backend
+# VideoSummarizer
 
-## Дипломная работа
-**Тема:** Разработка веб-приложения для создания интерактивных конспектов на основе медиаданных.
+Веб-приложение для создания интерактивных конспектов на основе медиаданных.
 
-**Идея:** Пользователь загружает медиафайл или ссылку на Rutube. Система извлекает аудио (через Cobalt), сохраняет его в объектное хранилище MinIO, транскрибирует речь через локальный ASR-сервис, а затем с помощью LLM генерирует структурированный конспект с временными метками.
+## Описание проекта
 
-Проект построен на базе архитектуры микросервисов и модульного монолита, взаимодействующих через асинхронные очереди (Celery/Redis) и gRPC/HTTP протоколы. Это обеспечивает масштабируемость тяжелых вычислительных задач (ASR/LLM) отдельно от API-сервера.
+VideoSummarizer — это дипломный проект, представляющий собой веб-приложение для автоматической обработки образовательных видео- и аудиоматериалов.
+
+Пользователь загружает медиафайл или передаёт ссылку на видео. Система извлекает аудиодорожку, сохраняет файл в объектное хранилище, выполняет автоматическое распознавание речи, а затем с помощью LLM формирует структурированный конспект в формате Markdown.
+
+Основная идея проекта — не просто получить краткое содержание медиафайла, а создать основу для интерактивного учебного конспекта, связанного с временными метками исходного материала.
+
+## Основные возможности
+
+- регистрация и авторизация пользователей;
+- загрузка аудио- и видеофайлов;
+- обработка ссылок на видеоплатформы через Cobalt;
+- дедупликация медиафайлов по хэшу;
+- хранение исходных файлов в S3-совместимом объектном хранилище MinIO;
+- автоматическое распознавание речи через локальный ASR-сервис;
+- сохранение транскрипции с временными метками;
+- генерация конспекта через GigaChat API;
+- map-reduce обработка длинных транскриптов;
+- отображение прогресса обработки через WebSocket;
+- хранение статусов обработки в PostgreSQL;
+- персональный конспект пользователя для каждого медиа;
+- возможность перегенерации конспекта;
+- просмотр конспекта в Markdown;
+- просмотр полного транскрипта.
+
+## Архитектурная идея
+
+Проект построен как модульный backend с асинхронным выполнением тяжёлых задач.
+
+API-сервер отвечает за:
+
+- авторизацию;
+- загрузку файлов;
+- работу с пользователями;
+- выдачу данных для frontend;
+- WebSocket-соединения.
+
+Тяжёлые операции вынесены в Celery-задачи:
+
+- обработка медиа;
+- подготовка аудио;
+- распознавание речи;
+- генерация конспекта.
+
+ASR вынесен в отдельный локальный BentoML-сервис, что позволяет независимо масштабировать или заменять модель распознавания речи.
+
+LLM-обработка выполняется через внешний API GigaChat и реализована по схеме map-reduce, чтобы система могла работать с длинными транскриптами.
+
+## Общий конвейер обработки
+
+```text
+Пользователь
+    ↓
+Загрузка файла / ссылка
+    ↓
+Дедупликация по source_id
+    ↓
+MinIO
+    ↓
+Celery ASR task
+    ↓
+Подготовка аудио
+    ↓
+Нарезка на сегменты
+    ↓
+ASR BentoML service
+    ↓
+MediaSegment + full_text
+    ↓
+Celery LLM task
+    ↓
+LLM map
+    ↓
+SummaryChunk
+    ↓
+LLM reduce
+    ↓
+Summary markdown
+    ↓
+Frontend
+````
+
+## Почему используется дедупликация
+
+Если один пользователь уже загрузил и обработал определённый файл, повторная загрузка такого же файла другим пользователем не должна запускать полный ASR-конвейер заново.
+
+Для этого при загрузке файла считается SHA-256 хэш. Он сохраняется как `source_id`.
+
+Если файл с таким `source_id` уже существует:
+
+- новый объект `Media` не создаётся;
+    
+- файл повторно не загружается в MinIO;
+    
+- ASR повторно не запускается;
+    
+- создаётся только связь пользователя с уже существующим медиа.
+    
+
+Это снижает нагрузку на систему, экономит GPU-ресурсы и ускоряет пользовательский сценарий.
+
+## Модель данных
+
+### Media
+
+`Media` описывает физический медиаобъект.
+
+Один `Media` может быть связан с несколькими пользователями.
+
+Основные поля:
+
+- `id`;
+    
+- `source_id`;
+    
+- `s3_key`;
+    
+- `status`;
+    
+- `full_text`.
+    
+
+### UserMedia
+
+`UserMedia` связывает пользователя и медиафайл.
+
+Это позволяет нескольким пользователям иметь доступ к одному физическому медиаобъекту без дублирования файла и транскрипции.
+
+### MediaSegment
+
+`MediaSegment` хранит результат ASR по отдельному временному фрагменту.
+
+Основные поля:
+
+- `position`;
+    
+- `start_time`;
+    
+- `end_time`;
+    
+- `text`;
+    
+- `words`.
+    
+
+Поле `words` содержит временные метки слов и может использоваться для синхронизации транскрипта с видео.
+
+### Summary
+
+`Summary` хранит пользовательский конспект.
+
+В текущей архитектуре действует правило:
+
+```text
+один пользователь + одно медиа = один актуальный конспект
+```
+
+При перегенерации новый конспект заменяет предыдущий, но создаётся новый `ProcessingJob`, чтобы история обработки сохранялась.
+
+Основные поля:
+
+- `media_id`;
+    
+- `user_id`;
+    
+- `job_id`;
+    
+- `content`;
+    
+- `content_json`;
+    
+- `status`;
+    
+- `provider`;
+    
+- `model_name`;
+    
+- `prompt_version`.
+    
+
+### SummaryChunk
+
+`SummaryChunk` хранит промежуточные результаты map-этапа LLM.
+
+Это нужно для обработки длинных транскриптов, которые нельзя эффективно отправить в LLM одним запросом.
+
+### ProcessingJob
+
+`ProcessingJob` описывает задачу обработки.
+
+Типы задач:
+
+- `asr`;
+    
+- `summary`.
+    
+
+Основные поля:
+
+- `job_type`;
+    
+- `status`;
+    
+- `current_stage`;
+    
+- `progress`;
+    
+- `error_message`;
+    
+- `started_at`;
+    
+- `completed_at`.
+    
+
+### ProcessingStage
+
+`ProcessingStage` описывает этап внутри задачи.
+
+Для ASR используются этапы:
+
+- `preparing`;
+    
+- `transcribing`;
+    
+- `finalizing`.
+    
+
+Для LLM используются этапы:
+
+- `llm_map`;
+    
+- `llm_reduce`.
+    
+
+Такой подход позволяет показывать пользователю понятный прогресс обработки по этапам.
+
+## Почему статусы хранятся в PostgreSQL
+
+Celery может хранить состояние задач, но это состояние не является удобным источником правды для приложения.
+
+В проекте источник правды — PostgreSQL.
+
+Celery-задачи только выполняют работу и обновляют таблицы:
+
+- `processing_jobs`;
+    
+- `processing_stages`.
+    
+
+Это даёт несколько преимуществ:
+
+- статус не теряется после перезапуска worker;
+    
+- frontend может получать состояние через REST API;
+    
+- WebSocket может читать актуальные статусы из БД;
+    
+- появляется история обработок;
+    
+- проще анализировать ошибки и длительность этапов.
+    
+
+## WebSocket
+
+Frontend получает обновления статуса через WebSocket.
+
+Пример подключения:
+
+```text
+ws://localhost:8000/media/ws/jobs/{job_id}?token={access_token}
+```
+
+WebSocket отдаёт состояние конкретной задачи:
+
+```json
+{
+  "type": "job_status",
+  "job": {
+    "id": "...",
+    "type": "summary",
+    "status": "processing",
+    "current_stage": "llm_map",
+    "progress": 50,
+    "stages": [
+      {
+        "name": "llm_map",
+        "status": "processing",
+        "progress": 50
+      },
+      {
+        "name": "llm_reduce",
+        "status": "pending",
+        "progress": 0
+      }
+    ]
+  }
+}
+```
+
+После завершения задачи сервер отправляет:
+
+```json
+{
+  "type": "job_finished",
+  "status": "completed"
+}
+```
+
+## ASR
+
+Для распознавания речи используется локальный ASR-сервис на BentoML.
+
+Модель:
+
+```text
+NVIDIA Parakeet-TDT 0.6B
+```
+
+ASR-конвейер:
+
+1. файл скачивается из MinIO;
+    
+2. аудио приводится к mono 16 kHz WAV;
+    
+3. аудио нарезается на временные сегменты;
+    
+4. сегменты отправляются батчами в ASR-сервис;
+    
+5. результат сохраняется в `MediaSegment`;
+    
+6. общий текст собирается в `Media.full_text`.
+    
+
+Для борьбы с потерей слов на границах используется overlap между сегментами.
+
+## LLM
+
+LLM-модуль использует GigaChat API.
+
+Обработка выполняется по схеме map-reduce.
+
+### Map-этап
+
+Транскрипт разбивается на несколько LLM-чанков.
+
+Для каждого чанка создаётся `SummaryChunk`, после чего GigaChat генерирует краткое структурированное содержание фрагмента.
+
+### Reduce-этап
+
+После обработки всех чанков промежуточные summaries объединяются и отправляются в LLM для формирования итогового Markdown-конспекта.
+
+Результат сохраняется в `Summary.content`.
+
+## Frontend
+
+Frontend реализован на Vue 3.
+
+Основные страницы:
+
+- страница загрузки медиа;
+    
+- список пользовательских конспектов;
+    
+- страница просмотра конспекта.
+    
+
+На странице списка отображается:
+
+- медиафайл;
+    
+- текущий статус обработки;
+    
+- компактный progress bar;
+    
+- кнопка создания или перегенерации конспекта;
+    
+- кнопка открытия готового конспекта.
+    
+
+Страница конспекта отображает:
+
+- Markdown-конспект;
+    
+- полный транскрипт;
+    
+- служебную информацию о модели и статусе.
+    
 
 ## Технологический стек
 
 ### Backend
-| Технология     | Версия  | Назначение               |
-|----------------|---------|--------------------------|
-| **Python**     | 3.12+   | Язык программирования    |
-| **FastAPI**    | 0.128.0 | Веб-фреймворк (API)      |
-| **SQLAlchemy** | 2.0.46  | ORM (асинхронная)        |
-| **Pydantic**   | 2.12.5  | Валидация данных         |
-| **Celery**     | 5.6.2   | Очереди задач            |
-| **Redis**      | 7.2.1   | Брокер сообщений + кэш   |
-| **PostgreSQL** | 16      | Реляционная БД           |
-| **MinIO**      | latest  | S3-совместимое хранилище |
+
+|Технология|Назначение|
+|---|---|
+|Python 3.12+|основной язык backend|
+|FastAPI|REST API и WebSocket|
+|SQLAlchemy|ORM|
+|PostgreSQL|основная база данных|
+|Celery|асинхронные задачи|
+|Redis|брокер сообщений для Celery|
+|MinIO|объектное хранилище|
+|Pydantic|конфигурация и схемы|
+|BentoML|serving ASR-модели|
+|GigaChat API|генерация конспектов|
 
 ### Frontend
-| Технология       | Версия | Назначение                |
-|------------------|--------|---------------------------|
-| **Vue.js**       | 3.x    | Реактивный фреймворк      |
-| **Tailwind CSS** | 3.x    | Утилитарный CSS-фреймворк |
-| **TypeScript**   | 5.x    | Типизация                 |
-| **Pinia**        | 2.x    | State management          |
 
-### ML & AI
-| Компонент       | Технология               | Описание                               |
-|-----------------|--------------------------|----------------------------------------|
-| **ASR**         | NVIDIA Parakeet-TDT 0.6B | Локальная модель распознавания речи    |
-| **ASR Serving** | BentoML                  | Динамический батчинг, оптимизация GPU  |
-| **LLM**         | DeepSeek / GigaChat API  | Суммаризация и структурирование текста |
+|Технология|Назначение|
+|---|---|
+|Vue 3|frontend framework|
+|TypeScript|типизация|
+|Tailwind CSS|стилизация|
+|Pinia|управление состоянием|
+|WebSocket|обновление статусов|
+|markdown-it|рендеринг Markdown|
+|DOMPurify|безопасная очистка HTML|
 
-### Инфраструктура
-- **Docker** + **Docker Compose** — контейнеризация
-- **Cobalt** (локально) — извлечение ссылок на аудио
-- **JWT** — аутентификация (access + refresh токены)
-- **WebSocket** — обновление статуса в реальном времени
+### ML / AI
 
----
+|Компонент|Назначение|
+|---|---|
+|NVIDIA Parakeet-TDT 0.6B|автоматическое распознавание речи|
+|GigaChat|генерация конспектов|
+|Map-reduce|обработка длинных транскриптов|
 
-## Архитектура проекта
+## Структура backend
 
-```mermaid
-graph TB
-    subgraph Client["🖥️ Клиентская сторона (User's Machine)"]
-        FE["Frontend<br/>Vue3 + Tailwind CSS"]
-        Cobalt["Local Cobalt Service<br/>Docker Container"]
-    end
-    
-    subgraph Server["🌐 Серверная сторона"]
-        Backend["Backend API<br/>FastAPI"]
-        
-        subgraph Storage["Хранилища"]
-            Redis["Redis<br/>Cache & Message Broker"]
-            PostgreSQL["PostgreSQL<br/>Database"]
-            MinIO["MinIO S3<br/>Object Storage"]
-        end
-        
-        subgraph Workers["Фоновая обработка"]
-            Celery1["Celery Worker #1"]
-            Celery2["Celery Worker #N"]
-        end
-        
-        ASR["ASR Microservice<br/>BentoML + NVIDIA Parakeet"]
-    end
-    
-    %% Client connections
-    FE <-->|HTTP/HTTPS JSON| Backend
-    FE <-->|Local HTTP| Cobalt
-    
-    %% Backend connections
-    Backend <-->|SQL| PostgreSQL
-    Backend <-->|S3 API| MinIO
-    Backend <-->|Pub/Sub & Cache| Redis
-    Backend <-->|gRPC/HTTP| ASR
-    
-    %% Celery connections
-    Redis -->|Task Queue PUSH/POP| Celery1
-    Redis -->|Task Queue PUSH/POP| Celery2
-    Celery1 -.->|Save Result| PostgreSQL
-    Celery2 -.->|Save Result| PostgreSQL
-    
-    %% Styling
-    classDef client fill:#dbeafe,stroke:#3b82f6,stroke-width:2px
-    classDef server fill:#d1fae5,stroke:#10b981,stroke-width:2px
-    classDef storage fill:#f3f4f6,stroke:#6b7280,stroke-width:2px
-    classDef workers fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
-    classDef asr fill:#fed7aa,stroke:#f97316,stroke-width:2px
-    
-    class FE,Cobalt client
-    class Backend server
-    class Redis,PostgreSQL,MinIO storage
-    class Celery1,Celery2 workers
-    class ASR asr
-```
-
-### Поток данных (Video-to-Transcript)
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User as 👤 Пользователь
-    participant FE as Frontend<br/>(Vue3)
-    participant Cobalt as Cobalt<br/>(Local Docker)
-    participant API as Backend API<br/>(FastAPI)
-    participant S3 as MinIO S3
-    participant Redis as Redis
-    participant DB as PostgreSQL
-    participant Celery as Celery Worker
-    participant ASR as ASR Service<br/>(BentoML)
-    participant LLM as LLM API<br/>(DeepSeek)
-    
-    Note over User,LLM: 📥 Этап 1: Загрузка и извлечение аудио
-    
-    User->>FE: Вводит ссылку на видео
-    FE->>Cobalt: GET /extract?url=...
-    Cobalt->>FE: Ссылка на аудио
-    FE->>FE: Скачивает аудио
-    FE->>API: POST /api/media/upload
-    API->>S3: Сохраняет файл
-    API->>DB: CREATE task (queued)
-    API->>Redis: PUSH task_id
-    API-->>FE: 201 Created
-    
-    Note over User,LLM: ⚙️ Этап 2: Асинхронная обработка
-    
-    Celery->>Redis: POP task_id
-    Celery->>DB: UPDATE (processing)
-    Celery->>S3: GET audio file
-    Celery->>ASR: gRPC transcribe(audio)
-    ASR-->>Celery: transcript + timestamps
-    Celery->>LLM: POST summarize(transcript)
-    LLM-->>Celery: structured summary
-    Celery->>DB: UPDATE (completed)
-    
-    Note over User,LLM: 📤 Этап 3: Получение результата
-    
-    FE->>API: GET /api/media/{id}/transcript
-    API->>DB: SELECT transcript + summary
-    API-->>FE: JSON с конспектом
-    FE-->>User: Интерактивный конспект
-```
-
-## Структура проекта (бэкенд)
-
-```
+```text
 modules/
-├── auth/               # Управление пользователями и доступом
-├── media/              # Роутеры загрузки, интеграция с S3 (MinIO)
-│   ├── storage.py      # Клиент S3Storage
-│   ├── tasks.py        # Celery таски для БД
-│   └── service.py      # Логика обработки медиаданных
-├── asr/                # Взаимодействие с ASR сервисом
-│   ├── service.py      # Клиент для BentoML (HTTP/gRPC)
-│   └── tasks.py        # Celery задача process_media (нарезка, вызов ASR)
-├── llm/                # Генерация конспектов через DeepSeek API
-└── shared/             # Общие ресурсы (DB session, Celery app, EventBus)
+├── auth/
+│   ├── models.py
+│   ├── router.py
+│   ├── schemas.py
+│   └── service.py
+│
+├── media/
+│   ├── models.py
+│   ├── router.py
+│   ├── schemas.py
+│   ├── service.py
+│   ├── storage.py
+│   └── tasks.py
+│
+├── asr/
+│   ├── config.py
+│   ├── service.py
+│   └── tasks.py
+│
+├── llm/
+│   ├── clients/
+│   │   ├── base.py
+│   │   └── gigachat.py
+│   ├── config.py
+│   ├── models.py
+│   ├── router.py
+│   ├── schemas.py
+│   ├── service.py
+│   └── tasks.py
+│
+└── shared/
+    ├── celery.py
+    ├── database.py
+    ├── event_bus.py
+    └── processing.py
 ```
 
-## Реализованные возможности
+## Структура frontend
 
-### Модуль `auth`
-- ✅ Регистрация нового пользователя (email, password)
-- ✅ Вход (JWT access token в теле ответа, refresh token в HttpOnly cookie)
-- ✅ Автоматическое обновление access token по refresh token
-- ✅ Выход (отзыв refresh token)
-- ✅ Получение информации о текущем пользователе (`/me`)
-- ✅ Роли подписки (free, pro, enterprise) – базовая структура
-- ✅ Защита эндпоинтов через `CurrentUser` и `require_subscription`
+```text
+src/
+├── api/
+│   └── processing.ts
+│
+├── components/
+│   ├── MarkdownViewer.vue
+│   ├── MediaSummaryCard.vue
+│   ├── ProcessingCompactStatus.vue
+│   └── ProcessingJobCard.vue
+│
+├── composables/
+│   └── useJobSocket.ts
+│
+├── views/
+│   ├── SummariesView.vue
+│   └── SummaryDetailView.vue
+│
+└── router/
+    └── index.ts
+```
 
-### Модуль `media`
-- ✅ Загрузка видео/аудиофайлов (до 500 МБ, поддерживаемые форматы)
-- ✅ Сохранение файла на диск с подпапкой по `user_id`
-- ✅ Вычисление SHA-256 хеша (для будущей дедупликации)
-- ✅ Создание записи в таблице `media` со статусом `uploaded`
-- ✅ Создание записи в `processing_jobs` для этапа `asr` (статус `pending`)
-- ✅ Эндпоинты: `POST /media/upload`, `GET /media/list`, `GET /media/{id}/status`
-- ✅ Интеграция с Celery: после загрузки запускается задача `process_asr`
+## Переменные окружения
 
-### Модуль `asr`
-- ✅ Загрузка модели `nvidia/parakeet-tdt-0.6b-v3` при старте воркера (кеширование)
-- ✅ Извлечение аудио из видео через `librosa` (с поддержкой ffmpeg)
-- ✅ Разбиение на технические сегменты (30 сек, перекрытие 2 сек) для обработки длинных файлов
-- ✅ Транскрипция с временными метками (параметр `timestamps=True`)
-- ✅ Сбор семантических сегментов от модели, дедупликация перекрытий
-- ✅ Сохранение результата в таблицу `transcriptions` (JSON-массив сегментов + полный текст)
-- ✅ Обновление статуса `media` на `transcribed` и завершение задачи `processing_jobs`
+Пример `.env`:
 
-### Инфраструктура
-- ✅ Настроен Celery с брокером Redis (воркер запускается с `--pool=solo` на Windows)
-- ✅ Общий экземпляр Celery в `shared/celery.py` с автоматическим обнаружением задач
-- ✅ Создание схем и таблиц БД при старте приложения (`init_db`)
-- ✅ Переменные окружения через `.env` (поддерживаются `DATABASE_URL`, `CELERY_*` и др.)
+```env
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/diplom
 
-## Запуск проекта (локальная разработка)
-### Требования
-- Docker & Docker Compose (для Redis, MinIO, Cobalt)
-- Python 3.12+
-- FFmpeg
+SECRET_KEY=secret-key-change-in-production
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+REFRESH_TOKEN_EXPIRE_DAYS=7
 
-### Установка
-1. Клонировать репозиторий.
-2. Установить зависимости: `uv sync`.
-3. Запустить инфраструктуру: `docker-compose up -d`.
-4. Настроить `.env` (параметры БД, S3 и API ключи).
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
 
-### Запуск компонентов
+GIGACHAT_AUTHORIZATION_KEY=your_gigachat_authorization_key
+GIGACHAT_SCOPE=GIGACHAT_API_PERS
+GIGACHAT_MODEL=GigaChat:latest
+
+TEMPERATURE=0.3
+MAX_TOKENS=4000
+CHUNK_SIZE_TOKENS=5000
+CHUNK_OVERLAP_TOKENS=500
+MAX_CHUNKS_PER_JOB=20
+```
+
+## Запуск инфраструктуры
+
+Пример запуска PostgreSQL, Redis, MinIO и Cobalt через Docker Compose зависит от конкретного `docker-compose.yml`.
+
+Минимально необходимы сервисы:
+
+- PostgreSQL;
+    
+- Redis;
+    
+- MinIO;
+    
+- Cobalt API;
+    
+- ASR BentoML service.
+    
+
+## Запуск backend
+
+Установить зависимости:
+
 ```bash
-# FastAPI сервер
-uvicorn main:app --reload
-
-# Celery воркер (обработка задач)
-celery -A modules.shared.celery worker --loglevel=info --pool=solo
-
-# ASR сервис
-bentoml serve asr_service:latest
+pip install -r requirements.txt
 ```
+
+Запустить FastAPI:
+
+```bash
+uvicorn main:app --reload
+```
+
+API будет доступен по адресу:
+
+```text
+http://localhost:8000
+```
+
+Документация FastAPI:
+
+```text
+http://localhost:8000/docs
+```
+
+## Запуск Celery worker
+
+```bash
+celery -A modules.shared.celery.celery_app worker --loglevel=info --pool=solo
+```
+
+Для Windows используется `--pool=solo`.
+
+## Запуск ASR-сервиса
+
+ASR-сервис запускается отдельно через BentoML.
+
+Ожидаемый адрес:
+
+```text
+http://localhost:3000
+```
+
+Backend обращается к ASR-сервису для батчевой транскрипции аудиосегментов.
+
+## Запуск frontend
+
+Установить зависимости:
+
+```bash
+npm install
+```
+
+Запустить dev-сервер:
+
+```bash
+npm run dev
+```
+
+Frontend будет доступен по адресу:
+
+```text
+http://localhost:5173
+```
+
+## Основные API endpoints
+
+### Auth
+
+```text
+POST /auth/register
+POST /auth/login
+POST /auth/refresh
+POST /auth/logout
+GET  /auth/me
+```
+
+### Media
+
+```text
+POST /media/upload
+GET  /media/my
+GET  /media/{media_id}/jobs
+GET  /media/{media_id}/transcription
+POST /media/process-url
+```
+
+### LLM
+
+```text
+POST /llm/media/{media_id}/summaries
+GET  /llm/media/{media_id}/summaries
+GET  /llm/summaries/{summary_id}
+GET  /llm/jobs/{job_id}/status
+```
+
+### WebSocket
+
+```text
+WS /media/ws/jobs/{job_id}?token={access_token}
+```
+
+## Особенности реализации
+
+### Дедупликация
+
+Файл идентифицируется по SHA-256 хэшу. Если файл уже был загружен, повторная загрузка не создаёт новый объект в MinIO и не запускает ASR повторно.
+
+### Общая транскрипция
+
+Транскрипция относится к `Media`, а не к пользователю. Это позволяет переиспользовать результат ASR между пользователями.
+
+### Пользовательский конспект
+
+Конспект относится к паре `user_id + media_id`. Это позволяет каждому пользователю иметь собственную версию конспекта.
+
+### История обработки
+
+Каждый запуск ASR или LLM фиксируется как `ProcessingJob`. Это позволяет хранить историю попыток, ошибок и длительности обработки.
+
+### WebSocket-прогресс
+
+Frontend получает статусы обработки в реальном времени. При этом источником правды остаётся PostgreSQL, а не состояние Celery.
+
+### Map-reduce LLM
+
+Длинная транскрипция разбивается на части. Каждая часть обрабатывается отдельно, после чего промежуточные результаты объединяются в итоговый конспект.
+
+## Текущие ограничения
+
+- интерактивная связь конспекта с плеером пока не реализована;
+    
+- `content_json` пока не используется как основной источник структурированных данных;
+    
+- нет встроенного видео- или аудиоплеера;
+    
+- нет embed-плеера для Rutube;
+    
+- нет редактирования конспекта;
+    
+- нет карточек для запоминания;
+    
+- нет полноценной истории версий конспекта в интерфейсе;
+    
+- chunking LLM пока использует приближённую оценку размера текста.
+    
+
+## План развития
+
+### 1. Структурированный LLM-результат
+
+Добавить генерацию `content_json`, чтобы каждый раздел, тезис, термин и вопрос имели временную привязку.
+
+### 2. Интерактивный конспект
+
+Сделать кликабельные временные метки внутри конспекта. При клике плеер должен перематываться на соответствующий момент.
+
+### 3. Видео- и аудиоплеер
+
+Добавить плеер для локальных файлов и embed-плеер для ссылок.
+
+### 4. Синхронный транскрипт
+
+Использовать `MediaSegment.words` для подсветки текущего фрагмента транскрипта во время воспроизведения.
+
+### 5. Редактирование конспекта
+
+Добавить возможность ручного редактирования Markdown-конспекта.
+
+### 6. Учебные материалы
+
+Добавить генерацию:
+
+- карточек для запоминания;
+    
+- вопросов для самопроверки;
+    
+- глоссария;
+    
+- ключевых терминов.
+    
+
+### 7. Автоматический полный pipeline
+
+После завершения ASR автоматически запускать LLM, чтобы пользователь получал готовый конспект без дополнительного действия.
+
+## Назначение проекта
+
+Проект разрабатывается в рамках выпускной квалификационной работы бакалавра по теме:
+
+```text
+Разработка веб-приложения для создания интерактивных конспектов на основе медиаданных
+```
+
+Главная цель проекта — сократить время ручного конспектирования образовательных материалов и предоставить пользователю инструмент для навигации по содержанию медиа через структурированный, интерактивный и редактируемый конспект.
