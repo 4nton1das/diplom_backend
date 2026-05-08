@@ -23,12 +23,27 @@ class Media(Base):
     __table_args__ = {"schema": "media"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    # Хэш файла (SHA256) или ID из Rutube. Ключ для дедупликации!
+
+    # file: sha256 файла
+    # rutube: rutube:<video_id>
     source_id = Column(String(255), unique=True, index=True)
-    s3_key = Column(String(512))  # Путь в MinIO (например, hash.mp3)
+
+    source_type = Column(String(50), nullable=False, default="file", index=True)
+
+    original_url = Column(Text, nullable=True)
+    embed_url = Column(Text, nullable=True)
+
+    title = Column(String(512), nullable=True)
+    original_filename = Column(String(512), nullable=True)
+
+    s3_key = Column(String(512))
+
+    mime_type = Column(String(255), nullable=True)
+    file_size = Column(Integer, nullable=True)
+    duration = Column(Float, nullable=True)
+
     status = Column(Enum(MediaStatus), default=MediaStatus.PENDING)
 
-    # Общий транскрипт (собирается воркером в конце)
     full_text = Column(Text, nullable=True)
 
     segments = relationship("MediaSegment", back_populates="media", cascade="all, delete-orphan")

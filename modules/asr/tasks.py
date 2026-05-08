@@ -115,6 +115,8 @@ def process_media_task(self, media_id_str: str, job_id_str: str | None = None):
         audio.export(mono_file, format="wav")
 
         duration_sec = len(audio) / 1000.0
+        media.duration = duration_sec
+        db.commit()
 
         update_stage(
             db=db,

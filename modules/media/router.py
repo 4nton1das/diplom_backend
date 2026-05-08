@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, UploadFile, File, status, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, UploadFile, File, Form, status, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import uuid
@@ -97,6 +97,14 @@ async def get_my_media(
         {
             "id": media.id,
             "source_id": media.source_id,
+            "source_type": media.source_type,
+            "title": media.title,
+            "original_filename": media.original_filename,
+            "original_url": media.original_url,
+            "embed_url": media.embed_url,
+            "mime_type": media.mime_type,
+            "file_size": media.file_size,
+            "duration": media.duration,
             "status": media.status.value,
             "has_transcript": bool(media.full_text),
             "created_at": user_media.created_at,
@@ -138,6 +146,44 @@ async def get_transcription(
 
 class VideoUrlRequest(BaseModel):
     url: str
+
+
+@router.post("/rutube/prepare")
+async def prepare_rutube_media(
+    request: VideoUrlRequest,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db_session),
+):
+    service = MediaService(db)
+
+    return await service.prepare_rutube_media(
+        user_id=current_user.user_id,
+        url=request.url,
+    )
+
+
+@router.post("/rutube/complete", status_code=status.HTTP_201_CREATED)
+async def complete_rutube_media(
+    current_user: CurrentUser,
+    url: str = Form(...),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db_session),
+):
+    service = MediaService(db)
+
+    media = await service.complete_rutube_media(
+        user_id=current_user.user_id,
+        url=url,
+        file=file,
+    )
+
+    return {
+        "id": media.id,
+        "status": media.status.value,
+        "source_type": media.source_type,
+        "title": media.title,
+        "embed_url": media.embed_url,
+    }
 
 
 @router.post("/process-url")
@@ -305,6 +351,15 @@ async def get_media_jobs(
     return {
         "media": {
             "id": media.id,
+            "source_id": media.source_id,
+            "source_type": media.source_type,
+            "title": media.title,
+            "original_filename": media.original_filename,
+            "original_url": media.original_url,
+            "embed_url": media.embed_url,
+            "mime_type": media.mime_type,
+            "file_size": media.file_size,
+            "duration": media.duration,
             "status": media.status.value,
             "has_transcript": bool(media.full_text),
         },
