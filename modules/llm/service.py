@@ -1,7 +1,6 @@
 # modules/llm/service.py
 
 import uuid
-from datetime import datetime, UTC
 
 from fastapi import HTTPException
 from sqlalchemy import select
