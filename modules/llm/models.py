@@ -182,6 +182,7 @@ class SummaryChunk(Base):
 
     source_text: Mapped[str] = mapped_column(Text, nullable=False)
     summary_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    summary_json: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True,)
 
     status: Mapped[str] = mapped_column(
         String(50),
