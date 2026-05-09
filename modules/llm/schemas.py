@@ -14,6 +14,21 @@ class SummaryCreateResponse(BaseModel):
     status: str
 
 
+class SummaryMediaRead(BaseModel):
+    id: uuid.UUID
+    source_type: str
+    title: Optional[str] = None
+    original_url: Optional[str] = None
+    embed_url: Optional[str] = None
+    mime_type: Optional[str] = None
+    file_size: Optional[int] = None
+    duration: Optional[float] = None
+    status: str
+
+    class Config:
+        from_attributes = True
+
+
 class SummaryRead(BaseModel):
     id: uuid.UUID
     media_id: uuid.UUID
@@ -38,6 +53,8 @@ class SummaryRead(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+
+    media: Optional[SummaryMediaRead] = None
 
     class Config:
         from_attributes = True

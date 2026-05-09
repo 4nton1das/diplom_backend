@@ -127,6 +127,11 @@ class Summary(Base):
         nullable=True,
     )
 
+    media = relationship(
+        "Media",
+        lazy="selectin",
+    )
+
     chunks: Mapped[list["SummaryChunk"]] = relationship(
         "SummaryChunk",
         back_populates="summary",

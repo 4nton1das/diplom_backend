@@ -167,8 +167,12 @@ class LLMService:
         user_id: uuid.UUID,
         summary_id: uuid.UUID,
     ) -> Summary:
+        from sqlalchemy.orm import selectinload
+
         result = await self.db.execute(
-            select(Summary).where(
+            select(Summary)
+            .options(selectinload(Summary.media))
+            .where(
                 Summary.id == summary_id,
                 Summary.user_id == user_id,
             )
@@ -188,10 +192,12 @@ class LLMService:
         user_id: uuid.UUID,
         media_id: uuid.UUID,
     ) -> list[Summary]:
+        from sqlalchemy.orm import selectinload
         await self.check_user_has_media_access(user_id, media_id)
 
         result = await self.db.execute(
             select(Summary)
+            .options(selectinload(Summary.media))
             .where(
                 Summary.user_id == user_id,
                 Summary.media_id == media_id,
